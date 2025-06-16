@@ -1,0 +1,94 @@
+#!/bin/bash
+
+clear
+echo "🛠️  اسکریپت راه‌اندازی تونل رمزنگاری‌شده با Rathole"
+echo "--------------------------------------------------"
+
+echo "1. نصب روی سرور خارجی (Server)"
+echo "2. نصب روی سرور ایران (Client)"
+echo "3. خروج"
+read -p "لطفاً یک گزینه انتخاب کنید [1-3]: " OPTION
+
+install_rathole() {
+  echo "⬇️ در حال دانلود Rathole..."
+  wget https://github.com/rapiz1/rathole/releases/latest/download/rathole-x86_64-unknown-linux-gnu.tar.gz -O rathole.tar.gz
+  tar -xzf rathole.tar.gz
+  chmod +x rathole
+  mv rathole /usr/local/bin/
+  echo "✅ Rathole نصب شد."
+}
+
+generate_server_config() {
+  echo "📡 ساخت فایل پیکربندی سرور..."
+  mkdir -p /etc/rathole
+  cat > /etc/rathole/server.toml <<EOF
+[server]
+bind_addr = "0.0.0.0:4567"
+
+[clients.iran]
+password = "supersecure"
+
+[clients.iran.ports.ssh]
+listen = "0.0.0.0:2222"
+remote = "127.0.0.1:22"
+EOF
+  echo "✅ فایل پیکربندی سرور ساخته شد."
+}
+
+generate_client_config() {
+  read -p "🔑 IP سرور خارجی رو وارد کن: " SERVER_IP
+  echo "📦 ساخت فایل پیکربندی کلاینت..."
+  mkdir -p /etc/rathole
+  cat > /etc/rathole/client.toml <<EOF
+[client]
+server_addr = "${SERVER_IP}:4567"
+default_token = "supersecure"
+
+[services.ssh]
+local = "127.0.0.1:22"
+EOF
+  echo "✅ فایل پیکربندی کلاینت ساخته شد."
+}
+
+create_service() {
+  ROLE=$1
+  echo "⚙️ ساخت سرویس systemd برای $ROLE..."
+  cat > /etc/systemd/system/rathole.service <<EOF
+[Unit]
+Description=Rathole tunnel service
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/rathole -c /etc/rathole/${ROLE}.toml
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reexec
+  systemctl daemon-reload
+  systemctl enable rathole
+  systemctl start rathole
+  echo "✅ سرویس راه‌اندازی شد و فعال شد."
+}
+
+case $OPTION in
+  1)
+    install_rathole
+    generate_server_config
+    create_service server
+    ;;
+  2)
+    install_rathole
+    generate_client_config
+    create_service client
+    ;;
+  3)
+    echo "👋 خداحافظ!"
+    exit 0
+    ;;
+  *)
+    echo "❌ گزینه نامعتبر!"
+    ;;
+esac
