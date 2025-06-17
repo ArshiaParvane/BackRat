@@ -1,94 +1,135 @@
 #!/bin/bash
 
-clear
-echo "🛠️  اسکریپت راه‌اندازی تونل رمزنگاری‌شده با Rathole"
-echo "--------------------------------------------------"
+# dynx.sh v1.0 - DNS Manager & Network Fix Tool by Pfcloud
 
-echo "1. نصب روی سرور خارجی (Server)"
-echo "2. نصب روی سرور ایران (Client)"
-echo "3. خروج"
-read -p "لطفاً یک گزینه انتخاب کنید [1-3]: " OPTION
+# چک کردن وجود whiptail
+if ! command -v whiptail &> /dev/null; then
+  echo "لطفاً قبل اجرا whiptail رو نصب کن:"
+  echo "sudo apt update && sudo apt install -y whiptail"
+  exit 1
+fi
 
-install_rathole() {
-  echo "⬇️ در حال دانلود Rathole..."
-  wget https://github.com/rapiz1/rathole/releases/latest/download/rathole-x86_64-unknown-linux-gnu.tar.gz -O rathole.tar.gz
-  tar -xzf rathole.tar.gz
-  chmod +x rathole
-  mv rathole /usr/local/bin/
-  echo "✅ Rathole نصب شد."
+declare -A DNS_SERVERS=(
+  ["Dynx"]="185.51.200.2 185.51.200.3"
+  ["Shecan"]="178.22.122.100 185.51.200.2"
+  ["MihanWebhost"]="185.55.226.26 185.55.226.27"
+  ["Google"]="8.8.8.8 8.8.4.4"
+  ["Cloudflare"]="1.1.1.1 1.0.0.1"
+)
+
+TMP_RESOLV="/tmp/resolv.conf.dyndns"
+
+function set_dns_temp() {
+  local dns1=$1
+  local dns2=$2
+  echo -e "nameserver $dns1\nnameserver $dns2" | sudo tee /etc/resolv.conf > /dev/null
 }
 
-generate_server_config() {
-  echo "📡 ساخت فایل پیکربندی سرور..."
-  mkdir -p /etc/rathole
-  cat > /etc/rathole/server.toml <<EOF
-[server]
-bind_addr = "0.0.0.0:4567"
-
-[clients.iran]
-password = "supersecure"
-
-[clients.iran.ports.ssh]
-listen = "0.0.0.0:2222"
-remote = "127.0.0.1:22"
-EOF
-  echo "✅ فایل پیکربندی سرور ساخته شد."
+function set_dns_systemd() {
+  local dns1=$1
+  local dns2=$2
+  sudo mkdir -p /etc/systemd/resolved.conf.d
+  echo -e "[Resolve]\nDNS=$dns1 $dns2\nFallbackDNS=8.8.8.8\nDNSOverTLS=no\n" | sudo tee /etc/systemd/resolved.conf.d/dynx.conf > /dev/null
+  sudo systemctl restart systemd-resolved
 }
 
-generate_client_config() {
-  read -p "🔑 IP سرور خارجی رو وارد کن: " SERVER_IP
-  echo "📦 ساخت فایل پیکربندی کلاینت..."
-  mkdir -p /etc/rathole
-  cat > /etc/rathole/client.toml <<EOF
-[client]
-server_addr = "${SERVER_IP}:4567"
-default_token = "supersecure"
-
-[services.ssh]
-local = "127.0.0.1:22"
-EOF
-  echo "✅ فایل پیکربندی کلاینت ساخته شد."
+function test_dns() {
+  local dns=$1
+  local domains=("github.com" "telegram.org" "google.com")
+  local failed=0
+  for d in "${domains[@]}"; do
+    if ! dig @$dns $d +short | grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+'; then
+      failed=1
+      echo "❌ $d resolve نشد"
+    else
+      echo "✅ $d resolve شد"
+    fi
+  done
+  return $failed
 }
 
-create_service() {
-  ROLE=$1
-  echo "⚙️ ساخت سرویس systemd برای $ROLE..."
-  cat > /etc/systemd/system/rathole.service <<EOF
-[Unit]
-Description=Rathole tunnel service
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/rathole -c /etc/rathole/${ROLE}.toml
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  systemctl daemon-reexec
-  systemctl daemon-reload
-  systemctl enable rathole
-  systemctl start rathole
-  echo "✅ سرویس راه‌اندازی شد و فعال شد."
+function restore_resolv() {
+  sudo cp /etc/resolv.conf.backup /etc/resolv.conf 2>/dev/null && echo "✅ فایل resolv.conf بازیابی شد" || echo "⚠️ بکاپ موجود نیست"
 }
 
-case $OPTION in
-  1)
-    install_rathole
-    generate_server_config
-    create_service server
-    ;;
-  2)
-    install_rathole
-    generate_client_config
-    create_service client
-    ;;
-  3)
-    echo "👋 خداحافظ!"
-    exit 0
-    ;;
-  *)
-    echo "❌ گزینه نامعتبر!"
-    ;;
-esac
+# Backup resolv.conf if not done
+if [ ! -f /etc/resolv.conf.backup ]; then
+  sudo cp /etc/resolv.conf /etc/resolv.conf.backup
+fi
+
+while true; do
+  CHOICE=$(whiptail --title "dynx.sh - DNS Manager & Fix Tool" --menu "یک گزینه انتخاب کنید:" 15 60 6 \
+    1 "فعالسازی DNS Dynx" \
+    2 "فعالسازی DNS دلخواه" \
+    3 "تست اتصال اینترنت" \
+    4 "بازگردانی DNS پیشفرض" \
+    5 "خروج" 3>&1 1>&2 2>&3)
+
+  case $CHOICE in
+    1)
+      echo -e "\nفعالسازی DNS Dynx..."
+      set_dns_temp ${DNS_SERVERS["Dynx"]}
+      if systemctl is-active systemd-resolved &>/dev/null; then
+        set_dns_systemd ${DNS_SERVERS["Dynx"]}
+      fi
+      echo "در حال تست DNS..."
+      test_dns 185.51.200.2
+      read -p "می‌خواهید تنظیم DNS را دائمی کنید؟ (y/n): " yn
+      if [[ $yn == "y" ]]; then
+        if systemctl is-active systemd-resolved &>/dev/null; then
+          set_dns_systemd ${DNS_SERVERS["Dynx"]}
+          echo "✅ DNS Dynx به صورت دائمی فعال شد"
+        else
+          echo -e "nameserver ${DNS_SERVERS["Dynx"]}" | sudo tee /etc/resolv.conf > /dev/null
+          echo "✅ DNS Dynx روی resolv.conf ذخیره شد"
+        fi
+      fi
+      ;;
+    2)
+      OPTIONS=""
+      for key in "${!DNS_SERVERS[@]}"; do
+        OPTIONS+="$key \"$key\" "
+      done
+      DNS_CHOICE=$(whiptail --title "انتخاب DNS" --menu "یک DNS انتخاب کنید:" 15 60 5 $OPTIONS 3>&1 1>&2 2>&3)
+      if [[ -n "$DNS_CHOICE" ]]; then
+        echo -e "\nفعالسازی DNS $DNS_CHOICE..."
+        set_dns_temp ${DNS_SERVERS[$DNS_CHOICE]}
+        if systemctl is-active systemd-resolved &>/dev/null; then
+          set_dns_systemd ${DNS_SERVERS[$DNS_CHOICE]}
+        fi
+        echo "در حال تست DNS..."
+        test_dns $(echo ${DNS_SERVERS[$DNS_CHOICE]} | awk '{print $1}')
+        read -p "می‌خواهید تنظیم DNS را دائمی کنید؟ (y/n): " yn
+        if [[ $yn == "y" ]]; then
+          if systemctl is-active systemd-resolved &>/dev/null; then
+            set_dns_systemd ${DNS_SERVERS[$DNS_CHOICE]}
+            echo "✅ DNS $DNS_CHOICE به صورت دائمی فعال شد"
+          else
+            echo -e "nameserver ${DNS_SERVERS[$DNS_CHOICE]}" | sudo tee /etc/resolv.conf > /dev/null
+            echo "✅ DNS $DNS_CHOICE روی resolv.conf ذخیره شد"
+          fi
+        fi
+      else
+        echo "انتخاب DNS لغو شد."
+      fi
+      ;;
+    3)
+      echo -e "\nدر حال تست اتصال اینترنت..."
+      ping -c 2 8.8.8.8 &> /dev/null && echo "✅ پینگ موفق" || echo "❌ پینگ ناموفق"
+      curl -s --max-time 5 https://google.com &> /dev/null && echo "✅ اتصال HTTP/HTTPS برقرار است" || echo "❌ اتصال HTTP/HTTPS قطع است"
+      ;;
+    4)
+      echo -e "\nدر حال بازگردانی DNS پیشفرض..."
+      restore_resolv
+      ;;
+    5)
+      echo "خروج... 🙋‍♂️"
+      exit 0
+      ;;
+    *)
+      echo "گزینه نامعتبر است."
+      ;;
+  esac
+
+  read -p "برای ادامه Enter بزنید..."
+done
