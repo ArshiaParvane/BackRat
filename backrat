@@ -1,191 +1,47 @@
+cat > setup-mikrotik-chr.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ==========================
-# MikroTik CHR on Ubuntu 20/22 via KVM/QEMU
-# ==========================
-# Defaults (قابل override با سوییچ‌ها)
 VM_NAME="mikrotik-chr"
 CHR_VERSION="7.15.3"
-CHR_URL=""
 RAM_MB=512
 VCPUS=1
 DISK_IMG="chr.qcow2"
 EXTRA_DISK_GB=2
-NETWORK_MODE="nat"   # nat | bridge
-BRIDGE_NAME="br0"
-DOWNLOAD_DIR="$HOME/chr-downloads"
+NETWORK_MODE="nat"
 
-usage() {
-  cat <<EOF
-Usage: $0 [options]
-
-Options:
-  --name NAME            نام ماشین مجازی (پیش‌فرض: $VM_NAME)
-  --version VER          نسخه CHR (مثال: 7.15.3). اگر --url بدهید این نادیده گرفته می‌شود.
-  --url URL              آدرس مستقیم فایل chr-*.img.zip (در صورت تمایل)
-  --ram MB               مقدار RAM به مگابایت (پیش‌فرض: $RAM_MB)
-  --vcpus N              تعداد vCPU (پیش‌فرض: $VCPUS)
-  --disk-extra N         افزایش حجم دیسک qcow2 به گیگابایت (پیش‌فرض: $EXTRA_DISK_GB)
-  --nat                  استفاده از شبکه NAT پیش‌فرض libvirt (پیش‌فرض)
-  --bridge BR            استفاده از bridge به‌نام BR (مثال: --bridge br0)
-  --download-dir PATH    مسیر دانلود (پیش‌فرض: $DOWNLOAD_DIR)
-  -h, --help             نمایش راهنما
-
-Examples:
-  $0 --name chr1 --version 7.15.3 --nat
-  $0 --name chr-bridge --bridge br0 --ram 1024 --vcpus 2
-  $0 --url https://download.mikrotik.com/routeros/7.15.3/chr-7.15.3.img.zip
-EOF
-}
-
-# پارس آرگومان‌ها
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --name) VM_NAME="$2"; shift 2 ;;
-    --version) CHR_VERSION="$2"; shift 2 ;;
-    --url) CHR_URL="$2"; shift 2 ;;
-    --ram) RAM_MB="$2"; shift 2 ;;
-    --vcpus) VCPUS="$2"; shift 2 ;;
-    --disk-extra) EXTRA_DISK_GB="$2"; shift 2 ;;
-    --nat) NETWORK_MODE="nat"; shift ;;
-    --bridge) NETWORK_MODE="bridge"; BRIDGE_NAME="$2"; shift 2 ;;
-    --download-dir) DOWNLOAD_DIR="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "Unknown option: $1"; usage; exit 1 ;;
-  esac
-done
-
-echo "=== MikroTik CHR setup starting ==="
-echo "VM Name        : $VM_NAME"
-echo "CHR Source     : ${CHR_URL:-"version $CHR_VERSION"}"
-echo "RAM (MB)       : $RAM_MB"
-echo "vCPUs          : $VCPUS"
-echo "Extra disk (GB): +$EXTRA_DISK_GB"
-echo "Network mode   : $NETWORK_MODE ${NETWORK_MODE == "bridge" ? "($BRIDGE_NAME)" : ""}"
-echo "Download dir   : $DOWNLOAD_DIR"
-echo ""
-
-# 1) پیش‌نیازها
-echo ">>> Installing packages..."
+echo ">>> Installing dependencies..."
 sudo apt update
 sudo apt install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virt-manager unzip wget qemu-utils
 
-# 2) عضویت گروه‌ها
-NEED_RELOGIN=false
-if ! id -nG "$USER" | grep -qw libvirt; then
-  echo ">>> Adding $USER to group 'libvirt'..."
-  sudo usermod -aG libvirt "$USER"
-  NEED_RELOGIN=true
-fi
-if ! id -nG "$USER" | grep -qw kvm; then
-  echo ">>> Adding $USER to group 'kvm'..."
-  sudo usermod -aG kvm "$USER"
-  NEED_RELOGIN=true
-fi
+echo ">>> Downloading CHR $CHR_VERSION ..."
+wget -O chr.img.zip "https://download.mikrotik.com/routeros/$CHR_VERSION/chr-$CHR_VERSION.img.zip"
+unzip -o chr.img.zip
 
-# 3) اطمینان از اجرا بودن libvirtd و شبکه پیش‌فرض
-echo ">>> Ensuring libvirtd and default network are running..."
+echo ">>> Converting image..."
+qemu-img convert -f raw -O qcow2 chr-$CHR_VERSION.img $DISK_IMG
+qemu-img resize $DISK_IMG +${EXTRA_DISK_GB}G
+
+echo ">>> Starting libvirtd..."
 sudo systemctl enable --now libvirtd
-if sudo virsh net-info default >/dev/null 2>&1; then
-  if [[ "$(sudo virsh net-info default | awk -F': ' '/Active/{print $2}')" != "yes" ]]; then
-    sudo virsh net-start default
-  fi
-else
-  # در برخی نصب‌ها شبکه default وجود ندارد: بسازیم
-  echo ">>> Creating libvirt default NAT network..."
-  cat >/tmp/default-net.xml <<'XML'
-<network>
-  <name>default</name>
-  <bridge name='virbr0' stp='on' delay='0'/>
-  <forward mode='nat'/>
-  <ip address='192.168.122.1' netmask='255.255.255.0'>
-    <dhcp>
-      <range start='192.168.122.2' end='192.168.122.254'/>
-    </dhcp>
-  </ip>
-</network>
-XML
-  sudo virsh net-define /tmp/default-net.xml
-  sudo virsh net-autostart default
-  sudo virsh net-start default
-fi
 
-# 4) دانلود CHR
-mkdir -p "$DOWNLOAD_DIR"
-pushd "$DOWNLOAD_DIR" >/dev/null
-
-ZIP_FILE=""
-IMG_RAW=""
-
-if [[ -n "$CHR_URL" ]]; then
-  ZIP_FILE="${CHR_URL##*/}"
-  echo ">>> Downloading CHR from custom URL..."
-  wget -O "$ZIP_FILE" "$CHR_URL"
-else
-  ZIP_FILE="chr-$CHR_VERSION.img.zip"
-  if [[ ! -f "$ZIP_FILE" ]]; then
-    echo ">>> Downloading CHR version $CHR_VERSION ..."
-    wget "https://download.mikrotik.com/routeros/$CHR_VERSION/$ZIP_FILE"
-  else
-    echo ">>> CHR zip already exists: $ZIP_FILE"
-  fi
-fi
-
-echo ">>> Unzipping $ZIP_FILE ..."
-unzip -o "$ZIP_FILE"
-# پیدا کردن فایل img اکسترکت‌شده
-IMG_RAW="$(ls -1 *.img | head -n1)"
-
-if [[ -z "$IMG_RAW" ]]; then
-  echo "ERROR: IMG file not found after unzip."
-  exit 1
-fi
-
-# 5) تبدیل به qcow2 و افزایش حجم
-echo ">>> Converting raw IMG to qcow2: $DISK_IMG"
-qemu-img convert -f raw -O qcow2 "$IMG_RAW" "$DISK_IMG"
-if [[ "$EXTRA_DISK_GB" -gt 0 ]]; then
-  echo ">>> Resizing qcow2 by +${EXTRA_DISK_GB}G"
-  qemu-img resize "$DISK_IMG" +${EXTRA_DISK_GB}G
-fi
-
-popd >/dev/null
-
-# 6) اگر VM همنام وجود دارد، حذف (اختیاری)
-if sudo virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
-  echo ">>> VM '$VM_NAME' already exists. Destroying and undefining it..."
-  sudo virsh destroy "$VM_NAME" >/dev/null 2>&1 || true
-  sudo virsh undefine "$VM_NAME" --remove-all-storage >/dev/null 2>&1 || true
-fi
-
-# 7) ساخت VM
-NET_ARG="--network network=default"
-if [[ "$NETWORK_MODE" == "bridge" ]]; then
-  echo ">>> Using bridge: $BRIDGE_NAME"
-  NET_ARG="--network bridge=$BRIDGE_NAME"
-fi
-
-echo ">>> Creating VM '$VM_NAME' ..."
+echo ">>> Creating VM..."
 sudo virt-install \
   --name "$VM_NAME" \
   --memory "$RAM_MB" \
   --vcpus "$VCPUS" \
-  --disk path="$DOWNLOAD_DIR/$DISK_IMG",format=qcow2 \
+  --disk path=$DISK_IMG,format=qcow2 \
   --import \
-  $NET_ARG \
+  --network network=default \
   --noautoconsole
 
-# 8) نمایش راهنمای کنسول
 echo ""
-echo "=== Done! ==="
-echo "To open serial console:"
+echo "✅ MikroTik CHR installed!"
+echo "To connect to console:"
 echo "  sudo virsh console $VM_NAME"
 echo ""
-echo "Default login:"
-echo "  user: admin"
-echo "  pass: (empty, just press Enter)"
-echo ""
-if $NEED_RELOGIN; then
-  echo "NOTE: You were added to 'kvm' and/or 'libvirt'. Re-login or run 'newgrp libvirt' and 'newgrp kvm' for immediate access without sudo."
-fi
+echo "Default login: admin (no password)"
+EOF
+
+chmod +x setup-mikrotik-chr.sh
+./setup-mikrotik-chr.sh
