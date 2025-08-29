@@ -11,8 +11,7 @@ EXTRA_DISK_GB=2
 NETWORK_MODE="nat"
 
 echo ">>> Installing dependencies..."
-sudo apt update
-sudo apt install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virt-manager unzip wget qemu-utils
+apt update && apt install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virt-manager unzip wget qemu-utils
 
 echo ">>> Downloading CHR $CHR_VERSION ..."
 wget -O chr.img.zip "https://download.mikrotik.com/routeros/$CHR_VERSION/chr-$CHR_VERSION.img.zip"
@@ -23,10 +22,10 @@ qemu-img convert -f raw -O qcow2 chr-$CHR_VERSION.img $DISK_IMG
 qemu-img resize $DISK_IMG +${EXTRA_DISK_GB}G
 
 echo ">>> Starting libvirtd..."
-sudo systemctl enable --now libvirtd
+systemctl enable --now libvirtd
 
 echo ">>> Creating VM..."
-sudo virt-install \
+virt-install \
   --name "$VM_NAME" \
   --memory "$RAM_MB" \
   --vcpus "$VCPUS" \
@@ -42,6 +41,5 @@ echo "  sudo virsh console $VM_NAME"
 echo ""
 echo "Default login: admin (no password)"
 EOF
-
 chmod +x setup-mikrotik-chr.sh
-./setup-mikrotik-chr.sh
+./setup-mikrotik-chr.sh --nat
